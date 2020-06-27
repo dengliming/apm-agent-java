@@ -25,11 +25,10 @@
 package co.elastic.apm.api;
 
 import co.elastic.apm.agent.AbstractInstrumentationTest;
-import co.elastic.apm.agent.configuration.CoreConfiguration;
 import co.elastic.apm.agent.impl.Scope;
 import co.elastic.apm.agent.impl.TextHeaderMapAccessor;
-import co.elastic.apm.agent.impl.sampling.ConstantSampler;
-import co.elastic.apm.agent.impl.transaction.TraceContext;
+import co.elastic.apm.agent.impl.TracerInternalApiUtils;
+import co.elastic.apm.agent.impl.transaction.AbstractSpan;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
@@ -37,7 +36,6 @@ import java.util.HashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Mockito.when;
 
 class ElasticApmApiInstrumentationTest extends AbstractInstrumentationTest {
 
@@ -235,19 +233,6 @@ class ElasticApmApiInstrumentationTest extends AbstractInstrumentationTest {
     }
 
     @Test
-    void testTraceContextScopes() {
-        co.elastic.apm.agent.impl.transaction.Transaction transaction = tracer.startRootTransaction(getClass().getClassLoader());
-        tracer.activate(transaction.getTraceContext());
-        final Span span = ElasticApm.currentSpan();
-        assertThat(tracer.getActive()).isInstanceOf(TraceContext.class);
-        tracer.deactivate(transaction.getTraceContext());
-        assertThat(tracer.getActive()).isNull();
-        try (co.elastic.apm.api.Scope activate = span.activate()) {
-            assertThat(tracer.getActive()).isInstanceOf(TraceContext.class);
-        }
-    }
-
-    @Test
     void testEnsureParentId() {
         final Transaction transaction = ElasticApm.startTransaction();
         try (co.elastic.apm.api.Scope scope = transaction.activate()) {
@@ -261,32 +246,32 @@ class ElasticApmApiInstrumentationTest extends AbstractInstrumentationTest {
 
     @Test
     void testTransactionWithRemoteParentFunction() {
-        final TraceContext parent = TraceContext.with64BitId(tracer);
-        parent.asRootSpan(ConstantSampler.of(true));
+        AbstractSpan<?> parent = tracer.startRootTransaction(null);
+        assertThat(parent).isNotNull();
         Map<String, String> headerMap = new HashMap<>();
-        parent.getTraceContext().setOutgoingTraceContextHeaders(headerMap, TextHeaderMapAccessor.INSTANCE);
+        parent.propagateTraceContext(headerMap, TextHeaderMapAccessor.INSTANCE);
         ElasticApm.startTransactionWithRemoteParent(headerMap::get).end();
-        assertThat(reporter.getFirstTransaction().getTraceContext().isChildOf(parent)).isTrue();
+        assertThat(reporter.getFirstTransaction().isChildOf(parent)).isTrue();
     }
 
     @Test
     void testTransactionWithRemoteParentFunctions() {
-        final TraceContext parent = TraceContext.with64BitId(tracer);
-        parent.asRootSpan(ConstantSampler.of(true));
+        AbstractSpan<?> parent = tracer.startRootTransaction(null);
+        assertThat(parent).isNotNull();
         Map<String, String> headerMap = new HashMap<>();
-        parent.getTraceContext().setOutgoingTraceContextHeaders(headerMap, TextHeaderMapAccessor.INSTANCE);
+        parent.propagateTraceContext(headerMap, TextHeaderMapAccessor.INSTANCE);
         ElasticApm.startTransactionWithRemoteParent(headerMap::get, key -> Collections.singletonList(headerMap.get(key))).end();
-        assertThat(reporter.getFirstTransaction().getTraceContext().isChildOf(parent)).isTrue();
+        assertThat(reporter.getFirstTransaction().isChildOf(parent)).isTrue();
     }
 
     @Test
     void testTransactionWithRemoteParentHeaders() {
-        final TraceContext parent = TraceContext.with64BitId(tracer);
-        parent.asRootSpan(ConstantSampler.of(true));
+        AbstractSpan<?> parent = tracer.startRootTransaction(null);
+        assertThat(parent).isNotNull();
         Map<String, String> headerMap = new HashMap<>();
-        parent.getTraceContext().setOutgoingTraceContextHeaders(headerMap, TextHeaderMapAccessor.INSTANCE);
+        parent.propagateTraceContext(headerMap, TextHeaderMapAccessor.INSTANCE);
         ElasticApm.startTransactionWithRemoteParent(null, key -> Collections.singletonList(headerMap.get(key))).end();
-        assertThat(reporter.getFirstTransaction().getTraceContext().isChildOf(parent)).isTrue();
+        assertThat(reporter.getFirstTransaction().isChildOf(parent)).isTrue();
     }
 
     @Test
@@ -313,7 +298,7 @@ class ElasticApmApiInstrumentationTest extends AbstractInstrumentationTest {
 
     @Test
     void testManualTimestampsDeactivated() {
-        when(config.getConfig(CoreConfiguration.class).isActive()).thenReturn(false);
+        TracerInternalApiUtils.pauseTracer(tracer);
         final Transaction transaction = ElasticApm.startTransaction().setStartTimestamp(0);
         transaction.startSpan().setStartTimestamp(1000).end(2000);
         transaction.end(3000);

@@ -29,7 +29,6 @@ import co.elastic.apm.agent.configuration.MessagingConfiguration;
 import co.elastic.apm.agent.impl.ElasticApmTracer;
 import co.elastic.apm.agent.impl.transaction.AbstractSpan;
 import co.elastic.apm.agent.impl.transaction.Span;
-import co.elastic.apm.agent.impl.transaction.TraceContextHolder;
 import co.elastic.apm.agent.impl.transaction.Transaction;
 import net.bytebuddy.asm.Advice;
 import net.bytebuddy.description.NamedElement;
@@ -109,7 +108,7 @@ public abstract class JmsMessageConsumerInstrumentation extends BaseJmsInstrumen
                 boolean createPollingTransaction = false;
                 boolean createPollingSpan = false;
                 if (tracer != null) {
-                    final TraceContextHolder<?> parent = tracer.getActive();
+                    final AbstractSpan<?> parent = tracer.getActive();
                     if (parent == null) {
                         createPollingTransaction = true;
                     } else {
@@ -148,8 +147,10 @@ public abstract class JmsMessageConsumerInstrumentation extends BaseJmsInstrumen
                             .withSubtype("jms")
                             .withAction("receive");
                     } else if (createPollingTransaction) {
-                        createdSpan = tracer.startRootTransaction(clazz.getClassLoader())
-                            .withType(MESSAGE_POLLING);
+                        createdSpan = tracer.startRootTransaction(clazz.getClassLoader());
+                        if (createdSpan != null) {
+                            ((Transaction) createdSpan).withType(MESSAGE_POLLING);
+                        }
                     }
 
                     if (createdSpan != null) {
@@ -205,7 +206,7 @@ public abstract class JmsMessageConsumerInstrumentation extends BaseJmsInstrumen
                 if (abstractSpan != null) {
                     try {
                         if (discard) {
-                            abstractSpan.setDiscard(true);
+                            abstractSpan.requestDiscarding();
                         } else if (addDetails) {
                             if (message != null && helper != null && destinationName != null) {
                                 abstractSpan.appendToName(" from ");
@@ -224,20 +225,21 @@ public abstract class JmsMessageConsumerInstrumentation extends BaseJmsInstrumen
                     && messagingConfiguration.getMessagePollingTransactionStrategy() != MessagingConfiguration.Strategy.POLLING
                     && !"receiveNoWait".equals(methodName)) {
 
-                    Transaction messageHandlingTransaction = helper.startJmsTransaction(message, clazz)
-                        .withType(MESSAGE_HANDLING)
-                        .withName(RECEIVE_NAME_PREFIX);
+                    Transaction messageHandlingTransaction = helper.startJmsTransaction(message, clazz);
+                    if (messageHandlingTransaction != null) {
+                        messageHandlingTransaction.withType(MESSAGE_HANDLING)
+                            .withName(RECEIVE_NAME_PREFIX);
 
-                    if (destinationName != null) {
-                        messageHandlingTransaction.appendToName(" from ");
-                        helper.addDestinationDetails(message, destination, destinationName, messageHandlingTransaction);
-                        helper.addMessageDetails(message, messageHandlingTransaction);
-                        helper.setMessageAge(message, messageHandlingTransaction);
+                        if (destinationName != null) {
+                            messageHandlingTransaction.appendToName(" from ");
+                            helper.addDestinationDetails(message, destination, destinationName, messageHandlingTransaction);
+                            helper.addMessageDetails(message, messageHandlingTransaction);
+                            helper.setMessageAge(message, messageHandlingTransaction);
+                        }
+
+                        messageHandlingTransaction.activate();
                     }
-
-                    messageHandlingTransaction.activate();
                 }
-
             }
         }
     }

@@ -27,7 +27,6 @@ package co.elastic.apm.agent.impl;
 import co.elastic.apm.agent.MockReporter;
 import co.elastic.apm.agent.configuration.CoreConfiguration;
 import co.elastic.apm.agent.configuration.SpyConfiguration;
-import co.elastic.apm.agent.context.AbstractLifecycleListener;
 import co.elastic.apm.agent.impl.error.ErrorCapture;
 import co.elastic.apm.agent.impl.sampling.ConstantSampler;
 import co.elastic.apm.agent.impl.stacktrace.StacktraceConfiguration;
@@ -46,7 +45,6 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -182,7 +180,7 @@ class ElasticApmTracerTest {
 
     @Test
     void testRecordException() {
-        tracerImpl.captureException(new Exception("test"), getClass().getClassLoader());
+        tracerImpl.captureAndReportException(new Exception("test"), getClass().getClassLoader());
         assertThat(reporter.getErrors()).hasSize(1);
         ErrorCapture error = reporter.getFirstError();
         assertThat(error.getException()).isNotNull();
@@ -202,8 +200,8 @@ class ElasticApmTracerTest {
         when(config.getConfig(CoreConfiguration.class).getIgnoreExceptions())
             .thenReturn(wildcardList);
 
-        tracerImpl.captureException(new DummyException1(), getClass().getClassLoader());
-        tracerImpl.captureException(new DummyException2(), getClass().getClassLoader());
+        tracerImpl.captureAndReportException(new DummyException1(), getClass().getClassLoader());
+        tracerImpl.captureAndReportException(new DummyException2(), getClass().getClassLoader());
         assertThat(reporter.getErrors()).isEmpty();
     }
 
@@ -288,40 +286,26 @@ class ElasticApmTracerTest {
             transaction.end();
         }
         assertThat(reporter.getFirstTransaction().isSampled()).isTrue();
-        assertThat(reporter.getFirstTransaction().getSpanCount().getDropped().get()).isEqualTo(1);
-        assertThat(reporter.getFirstTransaction().getSpanCount().getStarted().get()).isEqualTo(1);
+        assertThat(reporter.getFirstTransaction().getSpanCount().getDropped()).hasValue(1);
+        assertThat(reporter.getFirstTransaction().getSpanCount().getReported()).hasValue(1);
+        assertThat(reporter.getFirstTransaction().getSpanCount().getTotal()).hasValue(2);
         assertThat(reporter.getSpans()).hasSize(1);
     }
 
     @Test
-    void testDisable() {
-        when(config.getConfig(CoreConfiguration.class).isActive()).thenReturn(false);
-        Transaction transaction = tracerImpl.startRootTransaction(getClass().getClassLoader()); // 1
-        try (Scope scope = transaction.activateInScope()) {
-            assertThat(tracerImpl.currentTransaction()).isSameAs(transaction);
-            assertThat(transaction.isSampled()).isFalse();
-            Span span = transaction.createSpan();
-            try (Scope spanScope = span.activateInScope()) {
-                assertThat(tracerImpl.getActive()).isSameAs(span);
-                assertThat(tracerImpl.getActive()).isNotNull();
-            }
-            span.end();
-            assertThat(tracerImpl.getActive()).isSameAs(transaction);
-        }
-        transaction.end();
-        assertThat(tracerImpl.currentTransaction()).isNull();
-        assertThat(reporter.getTransactions()).isEmpty();
-        assertThat(reporter.getSpans()).isEmpty();
+    void testPause() {
+        tracerImpl.pause();
+        assertThat(tracerImpl.startRootTransaction(getClass().getClassLoader())).isNull();
     }
 
     @Test
-    void testDisableMidTransaction() {
+    void testPauseMidTransaction() {
         Transaction transaction = tracerImpl.startRootTransaction(getClass().getClassLoader());
         try (Scope scope = transaction.activateInScope()) {
             assertThat(tracerImpl.currentTransaction()).isSameAs(transaction);
+            tracerImpl.pause();
             Span span = tracerImpl.getActive().createSpan();
             try (Scope spanScope = span.activateInScope()) {
-                when(config.getConfig(CoreConfiguration.class).isActive()).thenReturn(false);
                 span.withName("test");
                 assertThat(span.getNameAsString()).isEqualTo("test");
                 assertThat(tracerImpl.getActive()).isSameAs(span);
@@ -330,7 +314,6 @@ class ElasticApmTracerTest {
             }
             Span span2 = tracerImpl.getActive().createSpan();
             try (Scope spanScope = span2.activateInScope()) {
-                when(config.getConfig(CoreConfiguration.class).isActive()).thenReturn(false);
                 span2.withName("test2");
                 assertThat(span2.getNameAsString()).isEqualTo("test2");
                 assertThat(tracerImpl.getActive()).isSameAs(span2);
@@ -365,41 +348,6 @@ class ElasticApmTracerTest {
     }
 
     @Test
-    void testLifecycleListener() {
-        int startBefore = TestLifecycleListener.start.get();
-        int stopBefore = TestLifecycleListener.stop.get();
-        final ElasticApmTracer tracer = new ElasticApmTracerBuilder()
-            .configurationRegistry(config)
-            .reporter(reporter)
-            .build();
-        assertThat(TestLifecycleListener.start.get()).isEqualTo(startBefore + 1);
-        assertThat(TestLifecycleListener.stop.get()).isEqualTo(stopBefore);
-
-        tracer.stop();
-        assertThat(TestLifecycleListener.stop.get()).isEqualTo(stopBefore + 1);
-    }
-
-    /*
-     * Has an entry in
-     * src/test/resources/META-INF/services/co.elastic.apm.agent.context.LifecycleListener
-     */
-    public static class TestLifecycleListener extends AbstractLifecycleListener {
-
-        public static final AtomicInteger start = new AtomicInteger();
-        public static final AtomicInteger stop = new AtomicInteger();
-
-        public TestLifecycleListener(ElasticApmTracer tracer) {
-            super(tracer);
-            start.incrementAndGet();
-        }
-
-        @Override
-        public void stop() {
-            stop.incrementAndGet();
-        }
-    }
-
-    @Test
     void testTransactionWithParentReference() {
         final Map<String, String> headerMap = Map.of(TraceContext.W3C_TRACE_PARENT_TEXTUAL_HEADER_NAME, "00-0af7651916cd43dd8448eb211c80319c-b9c7c989f97918e1-01");
         final Transaction transaction = tracerImpl.startChildTransaction(headerMap, TextHeaderMapAccessor.INSTANCE, ConstantSampler.of(false), 0, null);
@@ -429,26 +377,26 @@ class ElasticApmTracerTest {
     @Test
     void testStartSpanAfterTransactionHasEnded() {
         final Transaction transaction = tracerImpl.startRootTransaction(getClass().getClassLoader());
-        final TraceContext transactionTraceContext = transaction.getTraceContext().copy();
+        assertThat(transaction).isNotNull();
+        transaction.incrementReferences();
         transaction.end();
 
-        reporter.assertRecycledAfterDecrementingReferences();
 
-        tracerImpl.activate(transactionTraceContext);
-        try {
-            assertThat(tracerImpl.getActive()).isEqualTo(transactionTraceContext);
+
+        try (Scope transactionScope = transaction.activateInScope()) {
+            assertThat(tracerImpl.getActive()).isEqualTo(transaction);
             final Span span = tracerImpl.startSpan(TraceContext.fromActive(), tracerImpl);
             assertThat(span).isNotNull();
             try (Scope scope = span.activateInScope()) {
-                assertThat(tracerImpl.currentTransaction()).isNull();
+                assertThat(tracerImpl.currentTransaction()).isNotNull();
                 assertThat(tracerImpl.getActive()).isSameAs(span);
             } finally {
                 span.end();
             }
-        } finally {
-            tracerImpl.deactivate(transactionTraceContext);
         }
         assertThat(tracerImpl.getActive()).isNull();
+        transaction.decrementReferences();
+        reporter.assertRecycledAfterDecrementingReferences();
     }
 
     @Test
@@ -477,18 +425,6 @@ class ElasticApmTracerTest {
         tracer.startRootTransaction(getClass().getClassLoader()).end();
 
         assertThat(reporter.getFirstTransaction().getTraceContext().getServiceName()).isEqualTo("overridden");
-    }
-
-    @Test
-    void testOverrideServiceNameExplicitServiceName() {
-        final ElasticApmTracer tracer = new ElasticApmTracerBuilder()
-            .withConfig("service_name", "explicit-service-name")
-            .reporter(reporter)
-            .build();
-
-        tracer.overrideServiceNameForClassLoader(getClass().getClassLoader(), "overridden");
-        tracer.startRootTransaction(getClass().getClassLoader()).end();
-        assertThat(reporter.getFirstTransaction().getTraceContext().getServiceName()).isNull();
     }
 
     @Test

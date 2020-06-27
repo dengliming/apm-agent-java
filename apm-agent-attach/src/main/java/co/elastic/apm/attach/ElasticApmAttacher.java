@@ -11,9 +11,9 @@
  * the Apache License, Version 2.0 (the "License"); you may
  * not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- * 
+ *
  *   http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing,
  * software distributed under the License is distributed on an
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
@@ -31,8 +31,9 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.math.BigInteger;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -53,14 +54,6 @@ public class ElasticApmAttacher {
      * this can even lead to segfaults.
      */
     private static final String TEMP_PROPERTIES_FILE_KEY = "c";
-    private static final ByteBuddyAgent.AttachmentProvider ATTACHMENT_PROVIDER = new ByteBuddyAgent.AttachmentProvider.Compound(
-        ByteBuddyAgent.AttachmentProvider.ForEmulatedAttachment.INSTANCE,
-        ByteBuddyAgent.AttachmentProvider.ForModularizedVm.INSTANCE,
-        ByteBuddyAgent.AttachmentProvider.ForJ9Vm.INSTANCE,
-        new CachedAttachmentProvider(ByteBuddyAgent.AttachmentProvider.ForStandardToolsJarVm.JVM_ROOT),
-        new CachedAttachmentProvider(ByteBuddyAgent.AttachmentProvider.ForStandardToolsJarVm.JDK_ROOT),
-        new CachedAttachmentProvider(ByteBuddyAgent.AttachmentProvider.ForStandardToolsJarVm.MACINTOSH),
-        new CachedAttachmentProvider(ByteBuddyAgent.AttachmentProvider.ForUserDefinedToolsJar.INSTANCE));
 
     /**
      * Attaches the Elastic Apm agent to the current JVM.
@@ -163,7 +156,7 @@ public class ElasticApmAttacher {
         File tempFile = createTempProperties(configuration);
         String agentArgs = tempFile == null ? null : TEMP_PROPERTIES_FILE_KEY + "=" + tempFile.getAbsolutePath();
 
-        ByteBuddyAgent.attach(AgentJarFileHolder.INSTANCE.agentJarFile, pid, agentArgs, ATTACHMENT_PROVIDER);
+        ByteBuddyAgent.attach(AgentJarFileHolder.INSTANCE.agentJarFile, pid, agentArgs, ElasticAttachmentProvider.get());
         if (tempFile != null) {
             if (!tempFile.delete()) {
                 tempFile.deleteOnExit();
@@ -180,7 +173,7 @@ public class ElasticApmAttacher {
      */
     @Deprecated
     public static void attach(String pid, String agentArgs) {
-        ByteBuddyAgent.attach(AgentJarFileHolder.INSTANCE.agentJarFile, pid, agentArgs, ATTACHMENT_PROVIDER);
+        ByteBuddyAgent.attach(AgentJarFileHolder.INSTANCE.agentJarFile, pid, agentArgs, ElasticAttachmentProvider.get());
     }
 
     private enum AgentJarFileHolder {
@@ -189,6 +182,9 @@ public class ElasticApmAttacher {
         // initializes lazily and ensures it's only loaded once
         final File agentJarFile = getAgentJarFile();
 
+        /**
+         * {@see co.elastic.apm.agent.util.IOUtils#exportResourceToTemp(java.lang.String, java.lang.String, java.lang.String)} who share the same code.
+         */
         private static File getAgentJarFile() {
             try (InputStream agentJar = ElasticApmAttacher.class.getResourceAsStream("/elastic-apm-agent.jar")) {
                 if (agentJar == null) {
@@ -197,10 +193,17 @@ public class ElasticApmAttacher {
                 String hash = md5Hash(ElasticApmAttacher.class.getResourceAsStream("/elastic-apm-agent.jar"));
                 File tempAgentJar = new File(System.getProperty("java.io.tmpdir"), "elastic-apm-agent-" + hash + ".jar");
                 if (!tempAgentJar.exists()) {
-                    try (OutputStream out = new FileOutputStream(tempAgentJar)) {
-                        byte[] buffer = new byte[1024];
-                        for (int length; (length = agentJar.read(buffer)) != -1;) {
-                            out.write(buffer, 0, length);
+                    try (FileOutputStream out = new FileOutputStream(tempAgentJar)) {
+                        FileChannel channel = out.getChannel();
+                        // If multiple JVM start on same compute, they can write in same file
+                        // and this file will be corrupted.
+                        try (FileLock ignored = channel.lock()) {
+                            if (tempAgentJar.length() == 0) {
+                                byte[] buffer = new byte[1024];
+                                for (int length; (length = agentJar.read(buffer)) != -1; ) {
+                                    out.write(buffer, 0, length);
+                                }
+                            }
                         }
                     }
                 } else if (!md5Hash(new FileInputStream(tempAgentJar)).equals(hash)) {

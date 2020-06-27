@@ -43,31 +43,42 @@ public class ProfilingConfiguration extends ConfigurationOptionProvider {
     private static final String PROFILING_CATEGORY = "Profiling";
 
     private final ConfigurationOption<Boolean> profilingEnabled = ConfigurationOption.<Boolean>booleanOption()
-        .key("profiling_spans_enabled")
+        .key("profiling_inferred_spans_enabled")
         .configurationCategory(PROFILING_CATEGORY)
         .description("Set to `true` to make the agent create spans for method executions based on\n" +
             "https://github.com/jvm-profiling-tools/async-profiler[async-profiler], a sampling aka statistical profiler.\n" +
             "\n" +
-            "If this is enabled, the agent will start a profiling session every\n" +
-            "<<config-profiling-interval, `profiling_interval`>> which lasts for <<config-profiling-duration, `profiling_duration`>>.\n" +
-            "If a transaction happens within a profiling session,\n" +
-            "the agent creates spans for slow methods.\n" +
-            "\n" +
             "Due to the nature of how sampling profilers work,\n" +
             "the duration of the inferred spans are not exact, but only estimations.\n" +
-            "The <<config-profiling-sampling-interval, `profiling_sampling_interval`>> lets you fine tune the trade-off between accuracy and overhead.\n" +
+            "The <<config-profiling-inferred-spans-sampling-interval, `profiling_inferred_spans_sampling_interval`>> lets you fine tune the trade-off between accuracy and overhead.\n" +
             "\n" +
             "The inferred spans are created after a profiling session has ended.\n" +
             "This means there is a delay between the regular and the inferred spans being visible in the UI.\n" +
             "\n" +
             "NOTE: This feature is not available on Windows")
-        .tags("experimental")
         .dynamic(true)
-        .tags("added[1.14.0]")
+        .tags("added[1.15.0]", "experimental")
         .buildWithDefault(false);
 
+    private final ConfigurationOption<Boolean> backupDiagnosticFiles = ConfigurationOption.<Boolean>booleanOption()
+        .key("profiling_inferred_spans_backup_diagnostic_files")
+        .configurationCategory(PROFILING_CATEGORY)
+        .dynamic(true)
+        .tags("added[1.15.0]", "internal")
+        .buildWithDefault(false);
+
+    private final ConfigurationOption<Integer> asyncProfilerSafeMode = ConfigurationOption.<Integer>integerOption()
+        .key("async_profiler_safe_mode")
+        .configurationCategory(PROFILING_CATEGORY)
+        .dynamic(false)
+        .description("Can be used for analysis: the Async Profiler's area that deals with recovering stack trace frames \n" +
+            "is known to be sensitive in some systems. It is used as a bit mask using values are between 0 and 31, \n" +
+            "where 0 enables all recovery attempts and 31 disables all five (corresponding 1, 2, 4, 8 and 16).")
+        .tags("internal")
+        .buildWithDefault(0);
+
     private final ConfigurationOption<TimeDuration> samplingInterval = TimeDurationValueConverter.durationOption("ms")
-        .key("profiling_sampling_interval")
+        .key("profiling_inferred_spans_sampling_interval")
         .configurationCategory(PROFILING_CATEGORY)
         .dynamic(true)
         .description("The frequency at which stack traces are gathered within a profiling session.\n" +
@@ -75,42 +86,42 @@ public class ProfilingConfiguration extends ConfigurationOptionProvider {
             "This comes at the expense of higher overhead and more spans for potentially irrelevant operations.\n" +
             "The minimal duration of a profiling-inferred span is the same as the value of this setting.")
         .addValidator(isInRange(TimeDuration.of("1ms"), TimeDuration.of("1s")))
-        .tags("added[1.14.0]")
-        .buildWithDefault(TimeDuration.of("20ms"));
+        .tags("added[1.15.0]")
+        .buildWithDefault(TimeDuration.of("50ms"));
 
     private final ConfigurationOption<TimeDuration> inferredSpansMinDuration = TimeDurationValueConverter.durationOption("ms")
-        .key("profiling_spans_min_duration")
+        .key("profiling_inferred_spans_min_duration")
         .configurationCategory(PROFILING_CATEGORY)
         .dynamic(true)
         .description("The minimum duration of an inferred span.\n" +
             "Note that the min duration is also implicitly set by the sampling interval.\n" +
             "However, increasing the sampling interval also decreases the accuracy of the duration of inferred spans.")
-        .tags("added[1.14.0]")
+        .tags("added[1.15.0]")
         .addValidator(min(TimeDuration.of("0ms")))
         .buildWithDefault(TimeDuration.of("0ms"));
 
     private final ConfigurationOption<List<WildcardMatcher>> includedClasses = ConfigurationOption
         .builder(new ListValueConverter<>(new WildcardMatcherValueConverter()), List.class)
-        .key("profiling_included_classes")
+        .key("profiling_inferred_spans_included_classes")
         .configurationCategory(PROFILING_CATEGORY)
         .description("If set, the agent will only create inferred spans for methods which match this list.\n" +
-            "Setting a value may slightly increase performance and can reduce clutter by only creating spans for the classes you are interested in.\n" +
+            "Setting a value may slightly reduce overhead and can reduce clutter by only creating spans for the classes you are interested in.\n" +
             "Example: `org.example.myapp.*`\n" +
             "\n" +
             WildcardMatcher.DOCUMENTATION)
         .dynamic(true)
-        .tags("added[1.14.0]")
+        .tags("added[1.15.0]")
         .buildWithDefault(WildcardMatcher.matchAllList());
 
     private final ConfigurationOption<List<WildcardMatcher>> excludedClasses = ConfigurationOption
         .builder(new ListValueConverter<>(new WildcardMatcherValueConverter()), List.class)
-        .key("profiling_excluded_classes")
+        .key("profiling_inferred_spans_excluded_classes")
         .configurationCategory(PROFILING_CATEGORY)
         .description("Excludes classes for which no profiler-inferred spans should be created.\n" +
             "\n" +
             WildcardMatcher.DOCUMENTATION)
         .dynamic(true)
-        .tags("added[1.14.0]")
+        .tags("added[1.15.0]")
         .buildWithDefault(Arrays.asList(
             WildcardMatcher.caseSensitiveMatcher("java.*"),
             WildcardMatcher.caseSensitiveMatcher("javax.*"),
@@ -123,20 +134,21 @@ public class ProfilingConfiguration extends ConfigurationOptionProvider {
             WildcardMatcher.caseSensitiveMatcher("org.jboss.as.*"),
             WildcardMatcher.caseSensitiveMatcher("org.glassfish.*"),
             WildcardMatcher.caseSensitiveMatcher("org.eclipse.jetty.*"),
-            WildcardMatcher.caseSensitiveMatcher("com.ibm.websphere.*")
+            WildcardMatcher.caseSensitiveMatcher("com.ibm.websphere.*"),
+            WildcardMatcher.caseSensitiveMatcher("io.undertow.*")
         ));
 
     private final ConfigurationOption<TimeDuration> profilerInterval = TimeDurationValueConverter.durationOption("s")
-        .key("profiling_interval")
+        .key("profiling_inferred_spans_interval")
         .description("The interval at which profiling sessions should be started.")
         .configurationCategory(PROFILING_CATEGORY)
         .addValidator(min(TimeDuration.of("0ms")))
         .dynamic(true)
-        .tags("added[1.14.0]")
-        .buildWithDefault(TimeDuration.of("61s"));
+        .tags("added[1.15.0]", "internal")
+        .buildWithDefault(TimeDuration.of("5s"));
 
     private final ConfigurationOption<TimeDuration> profilingDuration = TimeDurationValueConverter.durationOption("s")
-        .key("profiling_duration")
+        .key("profiling_inferred_spans_duration")
         .description("The duration of a profiling session.\n" +
             "For sampled transactions which fall within a profiling session (they start after and end before the session),\n" +
             "so-called inferred spans will be created.\n" +
@@ -144,15 +156,19 @@ public class ProfilingConfiguration extends ConfigurationOptionProvider {
             "\n" +
             "NOTE: It is not recommended to set much higher durations as it may fill the activation events file and async-profiler's frame buffer.\n" +
             "Warnings will be logged if the activation events file is full.\n" +
-            "If you want to have more profiling coverage, try decreasing <<config-profiling-interval, `profiling_interval`>>.")
+            "If you want to have more profiling coverage, try decreasing <<config-profiling-inferred-spans-interval, `profiling_inferred_spans_interval`>>.")
         .configurationCategory(PROFILING_CATEGORY)
         .dynamic(true)
-        .addValidator(min(TimeDuration.of("1s")))
-        .tags("added[1.14.0]")
-        .buildWithDefault(TimeDuration.of("10s"));
+        .addValidator(isInRange(TimeDuration.of("1s"), TimeDuration.of("30s")))
+        .tags("added[1.15.0]", "internal")
+        .buildWithDefault(TimeDuration.of("5s"));
 
     public boolean isProfilingEnabled() {
         return profilingEnabled.get();
+    }
+
+    public int getAsyncProfilerSafeMode() {
+        return asyncProfilerSafeMode.get();
     }
 
     public boolean isProfilingDisabled() {
@@ -185,5 +201,9 @@ public class ProfilingConfiguration extends ConfigurationOptionProvider {
 
     public boolean isNonStopProfiling() {
         return getProfilingDuration().getMillis() >= getProfilingInterval().getMillis();
+    }
+
+    public boolean isBackupDiagnosticFiles() {
+        return backupDiagnosticFiles.get();
     }
 }
